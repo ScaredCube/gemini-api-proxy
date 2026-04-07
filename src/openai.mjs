@@ -378,26 +378,22 @@ const transformFnResponse = ({ content, tool_call_id }, parts) => {
   if (!parts.calls) {
     throw new HttpError("No function calls found in the previous message", 400);
   }
-  
   let response;
   try {
-    // 尝试将其解析为 JSON
     response = JSON.parse(content);
   } catch (err) {
-    // 【修改点】：如果不是标准的 JSON 字符串（比如纯文本），不要报错
-    // 直接把它包装成对象，Gemini API 要求 Function Response 必须是结构化 Object
-    response = { result: content };
+    response = { result: content }; // 我们上一步刚刚修复的文本解析兼容
   }
-  
-  // 确保最终结果是一个普通的 JSON Object
   if (typeof response !== "object" || response === null || Array.isArray(response)) {
     response = { result: response };
   }
-  
   if (!tool_call_id) {
     throw new HttpError("tool_call_id not specified", 400);
   }
-  const { i, name } = parts.calls[tool_call_id] ?? {};
+  
+  // 【修改点】取出我们解析过的 realId
+  const { i, name, realId } = parts.calls[tool_call_id] ?? {};
+  
   if (!name) {
     throw new HttpError("Unknown tool_call_id: " + tool_call_id, 400);
   }
@@ -406,7 +402,7 @@ const transformFnResponse = ({ content, tool_call_id }, parts) => {
   }
   parts[i] = {
     functionResponse: {
-      id: tool_call_id.startsWith("call_") ? null : tool_call_id,
+      id: realId && realId.startsWith("call_") ? null : realId, // 使用真实 ID
       name,
       response,
     }
@@ -426,13 +422,24 @@ const transformFnCalls = ({ tool_calls }) => {
       console.error("Error parsing function arguments:", err);
       throw new HttpError("Invalid function arguments: " + argstr, 400);
     }
-    calls[id] = {i, name};
+    
+    // 【修改点】拆解出真实的 ID 和被隐藏的 thoughtSignature
+    let realId = id;
+    let ts = "skip_thought_signature_validator"; // 官方兜底假签名，以防历史记录缺失
+    if (id && id.includes("|||")) {
+      const split = id.split("|||");
+      realId = split[0];
+      ts = split[1] || ts;
+    }
+    
+    calls[id] = {i, name, realId}; // 这里的 id 保持原样，以便之后匹配 Response
     return {
       functionCall: {
-        id: id.startsWith("call_") ? null : id,
+        id: realId.startsWith("call_") ? null : realId,
         name,
         args,
-      }
+      },
+      thoughtSignature: ts // 将签名加回给 Gemini
     };
   });
   parts.calls = calls;
@@ -566,14 +573,25 @@ const reasonsMap = { //https://ai.google.dev/api/rest/v1/GenerateContentResponse
   //"OTHER": "OTHER",
 };
 const SEP = "\n\n|>";
+
 const transformCandidates = (key, cand) => {
   const message = { role: "assistant", content: [] };
   for (const part of cand.content?.parts ?? []) {
     if (part.functionCall) {
       const fc = part.functionCall;
       message.tool_calls = message.tool_calls ?? [];
+      
+      // 【修改点】尝试捕获 Gemini 吐出的 thoughtSignature
+      const ts = part.thoughtSignature || part.thought_signature;
+      let tool_call_id = fc.id ?? "call_" + generateId();
+      
+      // 如果有签名，就用 ||| 分隔符把它藏进 id 里
+      if (ts) {
+        tool_call_id += "|||" + ts;
+      }
+      
       message.tool_calls.push({
-        id: fc.id ?? "call_" + generateId(),
+        id: tool_call_id,
         type: "function",
         function: {
           name: fc.name,
@@ -586,13 +604,13 @@ const transformCandidates = (key, cand) => {
   }
   message.content = message.content.join(SEP) || null;
   return {
-    index: cand.index || 0, // 0-index is absent in new -002 models response
+    index: cand.index || 0, 
     [key]: message,
     logprobs: null,
     finish_reason: message.tool_calls ? "tool_calls" : reasonsMap[cand.finishReason] || cand.finishReason,
-    //original_finish_reason: cand.finishReason,
   };
 };
+
 const transformCandidatesMessage = transformCandidates.bind(null, "message");
 const transformCandidatesDelta = transformCandidates.bind(null, "delta");
 
