@@ -237,15 +237,46 @@ const adjustProps = (schemaPart) => {
   if (typeof schemaPart !== "object" || schemaPart === null) {
     return;
   }
+  
   if (Array.isArray(schemaPart)) {
     schemaPart.forEach(adjustProps);
   } else {
-    if (schemaPart.type === "object" && schemaPart.properties && schemaPart.additionalProperties === false) {
+    // 1. 处理 OpenAI 的多类型数组 (例如 ["string", "null"])
+    if (Array.isArray(schemaPart.type)) {
+      const hasNull = schemaPart.type.includes("null");
+      // 提取出真实的类型
+      schemaPart.type = schemaPart.type.find(t => t !== "null") || "string";
+      // 告诉 Gemini 这个字段是可为空的
+      if (hasNull) {
+        schemaPart.nullable = true;
+      }
+    }
+
+    // 2. 将数据类型转换为 Gemini 规范的大写枚举类型 (如 string -> STRING)
+    if (typeof schemaPart.type === "string") {
+      schemaPart.type = schemaPart.type.toUpperCase();
+    }
+
+    // 3. 处理 OpenAI Structured Outputs 的特殊字段
+    if (schemaPart.type === "OBJECT" && schemaPart.properties && schemaPart.additionalProperties === false) {
       delete schemaPart.additionalProperties;
     }
+    
+    // 删除嵌套对象中可能出现的 strict 字段
+    if (schemaPart.strict !== undefined) {
+      delete schemaPart.strict;
+    }
+
+    // 4. 清理 Gemini 原生不支持的复杂 JSON Schema 关键字，防止报错
+    delete schemaPart.anyOf;
+    delete schemaPart.allOf;
+    delete schemaPart.oneOf;
+    delete schemaPart.$defs;
+
     Object.values(schemaPart).forEach(adjustProps);
   }
 };
+
 const adjustSchema = (schema) => {
   const obj = schema[schema.type];
   delete obj.strict;
