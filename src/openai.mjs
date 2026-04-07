@@ -378,16 +378,22 @@ const transformFnResponse = ({ content, tool_call_id }, parts) => {
   if (!parts.calls) {
     throw new HttpError("No function calls found in the previous message", 400);
   }
+  
   let response;
   try {
+    // 尝试将其解析为 JSON
     response = JSON.parse(content);
   } catch (err) {
-    console.error("Error parsing function response content:", err);
-    throw new HttpError("Invalid function response: " + content, 400);
+    // 【修改点】：如果不是标准的 JSON 字符串（比如纯文本），不要报错
+    // 直接把它包装成对象，Gemini API 要求 Function Response 必须是结构化 Object
+    response = { result: content };
   }
+  
+  // 确保最终结果是一个普通的 JSON Object
   if (typeof response !== "object" || response === null || Array.isArray(response)) {
     response = { result: response };
   }
+  
   if (!tool_call_id) {
     throw new HttpError("tool_call_id not specified", 400);
   }
